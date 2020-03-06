@@ -43,17 +43,17 @@ module Cont =
   let run (f : 'a -> 'r) (Cont k : Cont<'r,'a>) : 'r =
     k f
 
-  let map (f : 'a -> 'b) (Cont k : Cont<'r, 'a>) : Cont<'r, 'b> =
-    Cont (fun (g : 'b -> 'r) -> k (f >> g))
+  let map (f : 'a -> 'b) (k : Cont<'r, 'a>) : Cont<'r, 'b> =
+    Cont (fun (g : 'b -> 'r) -> run (f >> g) k)
 
-  let isomap (f : 'r -> 's) (g: 's -> 'r) (Cont k : Cont<'r,'a>) : Cont<'s,'a> =
-    Cont (fun (h : 'a -> 's) -> f (k (h >> g)))
+  let isomap (f : 'r -> 's) (g: 's -> 'r) (k : Cont<'r,'a>) : Cont<'s,'a> =
+    Cont (fun (h : 'a -> 's) -> f (run (h >> g) k))
 
   let halfmap (f : 'r -> 's) (Cont k : Cont<'r,'a>) : Reader<'a->'r,'s> =
     Reader (k >> f)
 
-  let join (Cont k: Cont<'r,Cont<'r,'a>>) : Cont<'r,'a> =
-    Cont (run >> k)
+  let join (k: Cont<'r,Cont<'r,'a>>) : Cont<'r,'a> =
+    Cont (run >> fun f -> run f k)
 
   let bind (f : 'a -> Cont<'r,'b>) (x : Cont<'r,'a>) : Cont<'r,'b> =
     join (map f x)
