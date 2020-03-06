@@ -76,8 +76,11 @@ module Eff =
   let handle (handlers : 'e) (Eff eff : Eff<'r,'e,'a>) : Cont<'r,'a> =
     Reader.run handlers eff
 
-  let run (handlers : 'e) : Eff<'a,'e,'a> -> 'a =
-    Cont.collapse << handle handlers
+  let run (handlers : 'e) (f : 'a -> 'r) : Eff<'r,'e,'a> -> 'r =
+    Cont.run f << handle handlers
+
+  let collapse (handlers : 'e) : Eff<'a,'e,'a> -> 'a =
+    run handlers id
 
   let join (eff: Eff<'r,'e,Eff<'r,'e,'a>>) : Eff<'r,'e,'a> =
     Eff (
@@ -96,6 +99,16 @@ module Eff =
   let lift (f : 'e -> Cont<'r,'a>) : Eff<'r,'e,'a> =
     Eff (Reader f)
 
+[<AutoOpen>]
+module WorkflowBuilders =
+  type EffWB() =
+    member __.Return (x : 'a) : Eff<'r,'e,'a> = Eff.wrap x
+    member __.Bind (x : Eff<'r,'e,'a>, f : 'a -> Eff<'r,'e,'b>) : Eff<'r,'e,'b> =
+      Eff.bind f x
+    member __.ReturnFrom (x : Eff<'r,'e,'a>) : Eff<'r,'e,'a> = x
+
+  let eff = EffWB ()
+
 type Fallible<'t,'r> =
   abstract member throw : 't -> Cont<'r,'a>
 
@@ -106,7 +119,7 @@ module Fallible =
 type ChoiceFailure<'t,'r>() =
   member self.run (eff : Eff<Choice<'t,'r>,ChoiceFailure<'t,'r>,'r>)
       : Choice<'t,'r> =
-    Eff.run self (Eff.map Choice2Of2 eff)
+    Eff.run self Choice2Of2 eff
 
   interface Fallible<'t,Choice<'t,'r>> with
     override __.throw (x : 't) : Cont<Choice<'t,'r>,'a> =
@@ -127,11 +140,56 @@ module ChoiceExample =
     | Choice2Of2 x -> printfn "Right %O" x
 
   let example () =
+    printfn "Exception-throwing example: pure interpretation"
+    printf "div 13 0 => "
     prettyPrint <| ChoiceFailure().run (div 13 0)
+    printf "div 13 1 => "
     prettyPrint <| ChoiceFailure().run (div 13 7)
+
+type NonDet<'a,'r> =
+  abstract member between : 'a -> 'a -> Cont<'r,'a>
+
+module NonDet =
+  let between<'r,'e,'a when 'e :> NonDet<'a,'r>> (lower : 'a) (upper: 'a)
+      : Eff<'r,'e,'a> =
+    Eff.lift (fun e -> e.between lower upper)
+
+type ImpureNonDet<'r>() =
+  let rand = System.Random()
+
+  member self.run (eff : Eff<'r,ImpureNonDet<'r>,'r>) : 'r =
+    Eff.collapse self eff
+
+  interface NonDet<int32,'r> with
+    override __.between (lower: int32) (upper: int32) : Cont<'r,int32> =
+      Cont.wrap (rand.Next(lower, upper))
+
+type PureNonDet<'r>() =
+  member self.run (eff : Eff<list<'r>,PureNonDet<'r>,'r>) : list<'r> =
+    Eff.run self List.singleton eff
+
+  interface NonDet<int32,list<'r>> with
+    override __.between (lower: int32) (upper: int32) : Cont<list<'r>,int32> =
+      Cont (fun f -> List.collect f [lower..upper])
+
+module NonDetExample =
+  let fizzbuzz<'r,'e when 'e :> NonDet<int32,'r>> : Eff<'r,'e,string> = eff {
+    let! x = NonDet.between 0 100
+    return match (x % 3 = 0, x % 5 = 0) with
+           | (true, true) -> "fizzbuzz"
+           | (true, false) -> "fizz"
+           | (false, true) -> "buzz"
+           | (false, false) -> string x
+  }
+
+  let example () =
+    printfn "Non-determinism example"
+    printfn "Impure: %O" <| ImpureNonDet().run fizzbuzz
+    printfn "Pure: %O" <| PureNonDet().run fizzbuzz
 
 module Main =
   [<EntryPoint>]
   let main(_: string[]): int =
     ChoiceExample.example ()
+    NonDetExample.example ()
     0
