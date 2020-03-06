@@ -53,9 +53,7 @@ module Cont =
     Reader (k >> f)
 
   let join (Cont k: Cont<'r,Cont<'r,'a>>) : Cont<'r,'a> =
-    Cont (fun (f : 'a -> 'r) ->
-      k (fun (k' : Cont<'r,'a>) -> run f k')
-    )
+    Cont (run >> k)
 
   let bind (f : 'a -> Cont<'r,'b>) (x : Cont<'r,'a>) : Cont<'r,'b> =
     join (map f x)
