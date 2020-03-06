@@ -37,6 +37,9 @@ module Cont =
   let wrap (x : 'a) : Cont<'r,'a> =
     Cont (fun (f : 'a -> 'r) -> f x)
 
+  let konst (x : 'r) : Cont<'r,'a> =
+    Cont (fun _ -> x)
+
   let run (f : 'a -> 'r) (Cont k : Cont<'r,'a>) : 'r =
     k f
 
@@ -61,58 +64,74 @@ module Cont =
     run id
 
 [<Struct>]
-type Eff<'r,'i,'o,'a> = | Eff of Reader<'i->Cont<'r,'o>,Cont<'r,'a>>
+type Eff<'r,'e,'a> = | Eff of Reader<'e,Cont<'r,'a>>
 
 module Eff =
-  let wrap (x : 'a) : Eff<'r,'i,'o,'a> =
+  let wrap (x : 'a) : Eff<'r,'e,'a> =
     Eff (Reader.wrap (Cont.wrap x))
 
-  let map (f : 'a -> 'b) (Eff k : Eff<'e,'i,'o,'a>) : Eff<'e,'i,'o,'b> =
+  let map (f : 'a -> 'b) (Eff k : Eff<'r,'e,'a>) : Eff<'r,'e,'b> =
     Eff (Reader.map (Cont.map f) k)
 
-  let handleK (h : 'i -> Cont<'r,'o>) (Eff eff: Eff<'r,'i,'o,'a>) : Cont<'r,'a> =
-    Reader.run h eff
+  let handle (handlers : 'e) (Eff eff : Eff<'r,'e,'a>) : Cont<'r,'a> =
+    Reader.run handlers eff
 
-  let handle (handler : 'i -> 'o) : Eff<'r,'i,'o,'a> -> Cont<'r,'a> =
-    handleK (handler >> Cont.wrap)
+  let run (handlers : 'e) : Eff<'a,'e,'a> -> 'a =
+    Cont.collapse << handle handlers
 
-  let join (eff: Eff<'e,'i,'o,Eff<'e,'i,'o,'a>>) : Eff<'e,'i,'o,'a> =
+  let join (eff: Eff<'r,'e,Eff<'r,'e,'a>>) : Eff<'r,'e,'a> =
     Eff (
-      Reader (fun (env: 'i -> Cont<'e,'o>) ->
-        Cont.bind (handleK env) (handleK env eff)
+      Reader (fun (handlers: 'e) ->
+        Cont.bind (handle handlers) (handle handlers eff)
       )
     )
 
-  let bind (f : 'a -> Eff<'e,'i,'o,'b>) (x : Eff<'e,'i,'o,'a>) : Eff<'e,'i,'o,'b> =
+  let bind (f : 'a -> Eff<'r,'e,'b>) (x : Eff<'r,'e,'a>) : Eff<'r,'e,'b> =
     join (map f x)
 
-  module Out =
-    let contramap (f : 'p -> 'o) (Eff eff: Eff<'r,'i,'o,'a>) : Eff<'r,'i,'p,'a> =
-      Eff (Reader.contramap (fun g -> g >> Cont.map f) eff)
+  let isomap (f : 'r -> 's) (g : 's -> 'r) (Eff eff : Eff<'r,'e,'a>)
+      : Eff<'s,'e,'a> =
+    Eff (Reader.map (Cont.isomap f g) eff)
 
-    let contramapK (f : 'p -> Cont<'r,'o>) (Eff eff: Eff<'r,'i,'o,'a>)
-        : Eff<'r,'i,'p,'a> =
-      Eff (Reader.contramap (fun g -> g >> Cont.bind f) eff)
+  let lift (f : 'e -> Cont<'r,'a>) : Eff<'r,'e,'a> =
+    Eff (Reader f)
 
-  module In =
-    let map (f : 'i -> 'j) (Eff eff: Eff<'r,'i,'o,'a>) : Eff<'r,'j,'o,'a> =
-      Eff (Reader.contramap (fun g -> f >> g) eff)
+type Fallible<'t,'r> =
+  abstract member throw : 't -> Cont<'r,'a>
 
-    let mapK (f : 'i -> Cont<'r,'j>) (Eff eff: Eff<'r,'i,'o,'a>)
-        : Eff<'r,'j,'o,'a> =
-      Eff (Reader.contramap (fun g -> f >> Cont.bind g) eff)
+module Fallible =
+  let throw<'t,'r,'e,'a when 'e :> Fallible<'t,'r>> (exc: 't) : Eff<'r,'e,'a> =
+    Eff.lift (fun e -> e.throw exc)
 
-  module Result =
-    let isomap (f : 'r -> 's) (g : 's -> 'r) (Eff eff : Eff<'r,'i,'o,'a>)
-        : Eff<'s,'i,'o,'a> =
-      Eff (Reader.dimap (Cont.isomap f g) (fun h -> h >> Cont.isomap g f) eff)
+type ChoiceFailure<'t,'r>() =
+  member self.run (eff : Eff<Choice<'t,'r>,ChoiceFailure<'t,'r>,'r>)
+      : Choice<'t,'r> =
+    Eff.run self (Eff.map Choice2Of2 eff)
 
-  let reinterpret
-      (intrptr : 'i -> Eff<'r,'j,'p,'o>)
-      (eff : Eff<'r,'i,'o,'a>)
-      : Eff<'r,'j,'p,'a> =
-    Eff (
-      Reader (fun (f : 'j -> Cont<'r,'p>) ->
-        handleK (intrptr >> handleK f) eff
-      )
-    )
+  interface Fallible<'t,Choice<'t,'r>> with
+    override __.throw (x : 't) : Cont<Choice<'t,'r>,'a> =
+      Cont.konst (Choice1Of2 x)
+
+module ChoiceExample =
+  type DivByZero = DivByZero
+
+  let div<'r,'e when 'e :> Fallible<DivByZero,'r>>
+      (num : int) (denom : int) : Eff<'r,'e,int> =
+    if denom = 0
+    then Fallible.throw DivByZero
+    else Eff.wrap (num / denom)
+
+  let prettyPrint (choice: Choice<'a,'b>) : unit =
+    match choice with
+    | Choice1Of2 x -> printfn "Left %O" x
+    | Choice2Of2 x -> printfn "Right %O" x
+
+  let example () =
+    prettyPrint <| ChoiceFailure().run (div 13 0)
+    prettyPrint <| ChoiceFailure().run (div 13 7)
+
+module Main =
+  [<EntryPoint>]
+  let main(_: string[]): int =
+    ChoiceExample.example ()
+    0
